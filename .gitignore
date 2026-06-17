@@ -1,0 +1,54 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+*.jks
+*.keystore
+
+# Logs and local runtime output
+*.log
+streamlit.log
+streamlit.err.log
+
+# Raw, processed, and scenario data should be added intentionally.
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/scenarios/*
+!data/scenarios/.gitkeep
+*.xls
+*.xlsx
+*.csv
+*.parquet
+*.feather
+*.sqlite
+*.db
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local planning notes and scratch backups
+*.txt
+!requirements.txt
+followplan*
+app2.py
