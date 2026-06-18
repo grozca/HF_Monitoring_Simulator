@@ -39,9 +39,14 @@ from src.column_mapping import (
 )
 from src.equipment_engine import EquipmentConfig
 from src.physics_engine import WellConfig, run_physics_engine
+from src.planned_vs_actual import apply_planned_vs_actual, build_planned_actual_interpretation
 from src.plots import (
     make_field_visual,
     make_formation_response_plot,
+    make_planned_actual_ppa_plot,
+    make_planned_actual_pressure_plot,
+    make_planned_actual_rate_plot,
+    make_planned_actual_sand_plot,
     make_pressure_decomposition_plot,
     make_sand_transport_plot,
     make_timeseries_plot,
@@ -67,12 +72,14 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+    :root {
+        --ui-font: 'JetBrains Mono', 'Courier New', Consolas, monospace;
+    }
 
     html, body, [class*="css"], .stApp {
         background-color: #0a0c0f !important;
         color: #e2e8f0 !important;
-        font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+        font-family: var(--ui-font) !important;
     }
     .block-container {
         padding-top: 0 !important;
@@ -108,15 +115,13 @@ st.markdown(
         background-color: #0d1117 !important;
         border-right: 1px solid #1e293b;
     }
+    [data-testid="stSidebarHeader"] {
+        min-height: 2.2rem;
+    }
     [data-testid="stSidebarCollapseButton"],
     [data-testid="stSidebarCollapsedControl"],
-    [data-testid="stSidebarHeader"],
     button[aria-label="Close sidebar"],
     button[aria-label="Open sidebar"] {
-        display: none !important;
-        visibility: hidden !important;
-    }
-    [data-testid="stSidebarHeader"] * {
         display: none !important;
         visibility: hidden !important;
     }
@@ -244,6 +249,7 @@ st.markdown(
         border-bottom: 2px solid #1a3a5c;
         padding: 0.42rem 0.85rem;
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
         gap: 0.75rem;
@@ -256,6 +262,7 @@ st.markdown(
         align-items: center;
         gap: 1.1rem;
         flex-wrap: wrap;
+        min-width: 0;
     }
     .groz-logo {
         font-size: 0.88rem;
@@ -267,6 +274,7 @@ st.markdown(
         color: #64748b;
         font-size: 0.68rem;
         letter-spacing: 0.02rem;
+        overflow-wrap: anywhere;
     }
     .groz-meta b { color: #38bdf8; }
     .groz-score {
@@ -277,6 +285,7 @@ st.markdown(
         border-radius: 3px;
         font-size: 0.66rem;
         letter-spacing: 0.05rem;
+        white-space: nowrap;
     }
     .groz-alarm {
         padding: 0.18rem 0.65rem;
@@ -284,6 +293,7 @@ st.markdown(
         font-size: 0.66rem;
         font-weight: 700;
         letter-spacing: 0.09rem;
+        white-space: nowrap;
     }
     .groz-alarm.ok       { background:#052e16; border:1px solid #16a34a; color:#4ade80; }
     .groz-alarm.warn     { background:#431407; border:1px solid #92400e; color:#f59e0b; }
@@ -346,6 +356,12 @@ st.markdown(
     .phase-badge.pad     { background:#1e3a5f; border-color:#2563eb; color:#93c5fd; }
 
     /* ── Diagnostics sidebar cards ── */
+    .diag-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.5rem;
+        margin-bottom: 0.6rem;
+    }
     .diag-section {
         background: #0d1117;
         border: 1px solid #1e293b;
@@ -353,6 +369,7 @@ st.markdown(
         padding: 0.55rem 0.75rem;
         margin-bottom: 0.5rem;
     }
+    .diag-grid .diag-section { margin-bottom: 0; }
     .diag-section-title {
         font-size: 0.58rem;
         letter-spacing: 0.13rem;
@@ -401,6 +418,118 @@ st.markdown(
         color: #475569;
     }
     .nav-label { color: #475569; font-size: 0.62rem; letter-spacing: 0.08rem; text-transform: uppercase; }
+    .timebar-head {
+        background: #0d1117;
+        border: 1px solid #1e293b;
+        border-bottom: 0;
+        border-radius: 3px 3px 0 0;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.42rem 0.75rem 0.18rem 0.75rem;
+        font-family: 'JetBrains Mono', 'Courier New', monospace;
+    }
+    .timebar-kicker {
+        color: #64748b;
+        font-size: 0.58rem;
+        letter-spacing: 0.14rem;
+        text-transform: uppercase;
+    }
+    .timebar-value {
+        color: #22d3ee;
+        font-size: 0.68rem;
+        font-weight: 700;
+        letter-spacing: 0.05rem;
+    }
+    .timebar-state {
+        color: #4ade80;
+        margin-left: 0.55rem;
+    }
+    [data-testid="stSlider"] {
+        background: #0d1117;
+        border-left: 1px solid #1e293b;
+        border-right: 1px solid #1e293b;
+        border-bottom: 1px solid #1e293b;
+        border-radius: 0 0 3px 3px;
+        padding: 0.15rem 0.75rem 0.55rem 0.75rem;
+    }
+    [data-testid="stSlider"] [role="slider"] {
+        background: #22d3ee !important;
+        border: 2px solid #0a0c0f !important;
+        box-shadow: 0 0 0 1px #38bdf8, 0 0 12px rgba(34, 211, 238, 0.34) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stSlider"] {
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        padding: 0;
+    }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding-left: 0.55rem !important;
+            padding-right: 0.55rem !important;
+        }
+        .groz-header {
+            align-items: flex-start;
+            gap: 0.45rem;
+        }
+        .groz-header-left,
+        .groz-header-right {
+            width: 100%;
+            gap: 0.45rem 0.65rem;
+        }
+        .groz-logo {
+            flex-basis: 100%;
+            letter-spacing: 0.20rem;
+        }
+        .kpi-cell {
+            flex: 1 1 33.333%;
+            min-width: 0;
+            border-bottom: 1px solid #1e293b;
+        }
+        .diag-grid {
+            grid-template-columns: 1fr;
+        }
+        [data-testid="stTabs"] [role="tablist"] {
+            overflow-x: auto;
+            flex-wrap: nowrap;
+            scrollbar-width: thin;
+        }
+        [data-testid="stTabs"] button[role="tab"] {
+            flex: 0 0 auto;
+            white-space: nowrap;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .groz-score,
+        .groz-alarm {
+            width: 100%;
+            text-align: center;
+        }
+        .kpi-cell {
+            flex-basis: 50%;
+            padding: 0.42rem 0.58rem;
+        }
+        .kpi-label {
+            font-size: 0.54rem;
+            letter-spacing: 0.08rem;
+        }
+        .kpi-value {
+            font-size: 0.98rem;
+            overflow-wrap: anywhere;
+        }
+        .phase-badge {
+            max-width: 100%;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        .diag-row {
+            gap: 0.75rem;
+        }
+    }
 
     /* dividers */
     hr { border-color: #1e293b !important; }
@@ -427,8 +556,7 @@ def init_session_state() -> None:
 
 def try_load_reference_excel() -> str:
     candidates = [
-        Path("data/raw/propetro_frac_realtime_simulator.xlsx"),
-        Path("data/raw/propetro_frac_realtime_simulator(2).xlsx"),
+        Path("data/raw/synthetic_frac_realtime_sample.xlsx"),
         Path("data/raw/HF2D.xls"),
         Path("data/raw/MF.xls"),
     ]
@@ -494,7 +622,7 @@ def simulate_job(
         max_treating_pressure_psi=max_treating_pressure_psi,
         rate_capacity_bpm=rate_capacity_bpm,
     )
-    return run_physics_engine(
+    actual_df = run_physics_engine(
         schedule,
         scenario=scenario,
         target_rate_bpm=target_rate_bpm,
@@ -505,6 +633,20 @@ def simulate_job(
         sand_transport=sand_transport,
         equipment=equipment,
     )
+    planned_reference_df = run_physics_engine(
+        schedule,
+        scenario="Normal Job",
+        target_rate_bpm=target_rate_bpm,
+        duration_min=duration_min,
+        severity=severity,
+        seed=seed,
+        well=well,
+        sand_transport=sand_transport,
+        equipment=equipment,
+    )
+    enriched_df, event_log = apply_planned_vs_actual(actual_df, planned_reference_df)
+    enriched_df.attrs["planned_actual_event_log"] = event_log
+    return enriched_df
 
 
 # ── Sidebar controls ───────────────────────────────────────────────────────────
@@ -694,13 +836,33 @@ def advance_replay(duration_min: float, dt_min: float, playing: bool, replay_spe
 def render_navigation(duration_min: float, dt_min: float, playing: bool) -> None:
     nav_cols = st.columns([4, 1, 1])
     with nav_cols[0]:
+        current_time = float(min(st.session_state.current_time, duration_min))
+        state_label = "LIVE" if playing else "MANUAL"
+        st.markdown(
+            f"""
+            <div class="timebar-head">
+                <span class="timebar-kicker">Stage Clock</span>
+                <span class="timebar-value">{current_time:.2f} / {duration_min:.0f} min
+                    <span class="timebar-state">{state_label}</span>
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         if playing:
-            st.slider("Operation time, min", 0.0, float(duration_min),
-                      float(st.session_state.current_time), float(dt_min), disabled=True)
+            st.slider(
+                "Stage clock, min", 0.0, float(duration_min),
+                current_time, float(dt_min), disabled=True,
+                label_visibility="collapsed",
+                key="operation_time_slider_disabled",
+            )
         else:
             st.session_state.current_time = st.slider(
-                "Operation time, min", 0.0, float(duration_min),
-                float(min(st.session_state.current_time, duration_min)), float(dt_min))
+                "Stage clock, min", 0.0, float(duration_min),
+                current_time, float(dt_min),
+                label_visibility="collapsed",
+                key="operation_time_slider",
+            )
     with nav_cols[1]:
         if st.button("↺  Reset"):
             st.session_state.current_time = 0.0
@@ -995,12 +1157,12 @@ def render_excel_explorer_tab() -> None:
     if not raw_files:
         st.info(
             "No Excel or CSV files detected yet. Copy your files into data/raw/: "
-            "MF.xls, HF2D.xls, and propetro_frac_realtime_simulator.xlsx."
+            "MF.xls, HF2D.xls, or synthetic_frac_realtime_sample.xlsx."
         )
         st.code(
             "data/raw/MF.xls\n"
             "data/raw/HF2D.xls\n"
-            "data/raw/propetro_frac_realtime_simulator.xlsx",
+            "data/raw/synthetic_frac_realtime_sample.xlsx",
             language="text",
         )
         return
@@ -1302,6 +1464,20 @@ def main() -> None:
     current_idx = int(np.argmin(np.abs(df["time_min"].to_numpy() - st.session_state.current_time)))
     live_df     = df.iloc[: current_idx + 1].copy()
     row         = df.iloc[current_idx]
+    plan_event_log = df.attrs.get("planned_actual_event_log")
+    if not isinstance(plan_event_log, pd.DataFrame):
+        plan_event_log = pd.DataFrame(columns=["time_min", "event_type", "severity", "message", "evidence"])
+    live_plan_events = plan_event_log[
+        pd.to_numeric(plan_event_log.get("time_min", pd.Series(dtype=float)), errors="coerce")
+        <= float(st.session_state.current_time)
+    ].copy()
+
+    def row_float(column: str, default: float = 0.0) -> float:
+        try:
+            value = float(row.get(column, default))
+        except (TypeError, ValueError):
+            return default
+        return value if np.isfinite(value) else default
 
     # ── Console header (logo, well metadata, alarm)
     render_console_header(row, controls)
@@ -1317,8 +1493,8 @@ def main() -> None:
     render_status(row)
 
     # ── Main tabs
-    tab_dashboard, tab_visual, tab_formation, tab_training, tab_excel, tab_calibration, tab_data = st.tabs(
-        ["Dashboard", "Field Visual", "Formation Details",
+    tab_dashboard, tab_plan, tab_visual, tab_formation, tab_training, tab_excel, tab_calibration, tab_data = st.tabs(
+        ["Dashboard", "Planned vs Actual", "Field Visual", "Formation Details",
          "Training Mode", "Excel Explorer", "Calibration", "Data"]
     )
 
@@ -1356,6 +1532,81 @@ def main() -> None:
             make_sand_transport_plot(live_df, current_minute=st.session_state.current_time),
             width="stretch",
         )
+
+    with tab_plan:
+        status = str(row.get("overall_execution_status", "ON PLAN"))
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("Plan Score", f"{row_float('plan_compliance_score', 100.0):.0f}/100", status)
+        metric_cols[1].metric("Rate Error", f"{row_float('rate_error_pct'):+.1f}%")
+        metric_cols[2].metric("PPA Error", f"{row_float('ppa_error'):+.2f}")
+        metric_cols[3].metric("Pressure Error", f"{row_float('surface_pressure_error_psi'):+,.0f} psi")
+        metric_cols[4].metric("Cum Sand Error", f"{row_float('cum_sand_error_pct'):+.1f}%")
+
+        interpretation = build_planned_actual_interpretation(
+            df=df,
+            event_log=plan_event_log,
+            current_time_min=float(st.session_state.current_time),
+        )
+        interpretation_status = str(interpretation.get("status", "INFO")).upper()
+        interpretation_text = (
+            f"### {interpretation.get('title', 'Planned-vs-actual interpretation')}\n\n"
+            f"{interpretation.get('summary', '')}"
+        )
+        if interpretation_status == "ON PLAN":
+            st.success(interpretation_text)
+        elif interpretation_status == "WATCH":
+            st.warning(interpretation_text)
+        elif interpretation_status in {"WARNING", "CRITICAL"}:
+            st.error(interpretation_text)
+        else:
+            st.info(interpretation_text)
+
+        st.markdown("**Evidence:**")
+        for item in interpretation.get("evidence", []):
+            st.write(f"- {item}")
+        st.markdown(f"**Recommended action:** {interpretation.get('recommended_action', 'Continue monitoring')}")
+
+        plot_cols = st.columns(2)
+        with plot_cols[0]:
+            st.plotly_chart(
+                make_planned_actual_rate_plot(live_df, current_minute=st.session_state.current_time),
+                width="stretch",
+            )
+            st.plotly_chart(
+                make_planned_actual_sand_plot(live_df, current_minute=st.session_state.current_time),
+                width="stretch",
+            )
+        with plot_cols[1]:
+            st.plotly_chart(
+                make_planned_actual_ppa_plot(live_df, current_minute=st.session_state.current_time),
+                width="stretch",
+            )
+            st.plotly_chart(
+                make_planned_actual_pressure_plot(live_df, current_minute=st.session_state.current_time),
+                width="stretch",
+            )
+
+        st.subheader("Event Log")
+        event_cols = ["time_min", "event_type", "severity", "message", "evidence"]
+        if live_plan_events.empty:
+            st.caption("No planned-vs-actual events have triggered up to the current replay time.")
+        else:
+            severity_colors = {
+                "INFO": "background-color: #0f172a; color: #94a3b8;",
+                "WATCH": "background-color: #422006; color: #fbbf24;",
+                "WARNING": "background-color: #431407; color: #fb923c;",
+                "CRITICAL": "background-color: #450a0a; color: #f87171;",
+            }
+
+            def color_severity(value: object) -> str:
+                return severity_colors.get(str(value).upper(), "")
+
+            event_table = live_plan_events[event_cols].tail(40).copy()
+            st.dataframe(
+                event_table.style.map(color_severity, subset=["severity"]),
+                width="stretch",
+                hide_index=True,
+            )
 
     with tab_visual:
         render_field_visual_kpis(row)

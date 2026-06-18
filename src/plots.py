@@ -56,6 +56,14 @@ SERIES_LABELS = {
     "acceptance_index":      "Acceptance",
     "screenout_risk":        "Screenout Risk",
     "fluid_efficiency":      "Fluid Efficiency",
+    "planned_rate_bpm":      "Planned Slurry Rate",
+    "planned_clean_rate_bpm":"Planned Clean Rate",
+    "planned_ppa":           "Planned Surface PPA",
+    "planned_bottomhole_ppa":"Planned BH PPA",
+    "planned_cum_sand_lb":   "Planned Cum Sand",
+    "planned_surface_pressure_psi":"Planned Surface",
+    "planned_bhp_psi":       "Planned BHP",
+    "planned_net_pressure_psi":"Planned Net",
 }
 
 # Map column → palette key for auto-coloring
@@ -77,6 +85,14 @@ _COL_COLOR: dict[str, str] = {
     "fluid_efficiency":       COLORS["eff"],
     "treating_pressure_limit_psi": COLORS["limit"],
     "sand_in_wellbore_lb":    COLORS["sand"],
+    "planned_rate_bpm":       "#64748b",
+    "planned_clean_rate_bpm": "#475569",
+    "planned_ppa":            "#86efac",
+    "planned_bottomhole_ppa": "#fbbf24",
+    "planned_cum_sand_lb":    "#64748b",
+    "planned_surface_pressure_psi": "#67e8f9",
+    "planned_bhp_psi":        "#fca5a5",
+    "planned_net_pressure_psi":"#86efac",
 }
 
 
@@ -95,16 +111,22 @@ def _col_color(col: str, fallback: str = "#94a3b8") -> str:
 
 def _style(fig: go.Figure, title: str, *, height: int = 360) -> go.Figure:
     """Apply full dark SCADA theme to any figure."""
+    meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+    event_label_rows = int(meta.get("event_label_rows", 0) or 0)
+    top_margin = 62 + 34 * event_label_rows
+    bottom_margin = 96
+    chart_height = height + 28 * event_label_rows
+
     fig.update_layout(
         title=dict(
             text=f"<span style='font-family:Courier New;font-size:13px;"
                  f"letter-spacing:2px;color:#94a3b8;'>{title.upper()}</span>",
             x=0.0,
             xanchor="left",
-            y=0.98,
+            y=0.99,
             yanchor="top",
         ),
-        height=height,
+        height=chart_height,
         paper_bgcolor=COLORS["bg_paper"],
         plot_bgcolor=COLORS["bg_plot"],
         font=dict(
@@ -112,16 +134,17 @@ def _style(fig: go.Figure, title: str, *, height: int = 360) -> go.Figure:
             color="#94a3b8",
             size=11,
         ),
-        margin=dict(l=60, r=28, t=44, b=72),
+        margin=dict(l=68, r=40, t=top_margin, b=bottom_margin),
         legend=dict(
             orientation="h",
             yanchor="top",
-            y=-0.18,
+            y=-0.24,
             xanchor="left",
             x=0.0,
             font=dict(size=10, family="Courier New, monospace", color="#64748b"),
             bgcolor="rgba(0,0,0,0)",
-            itemwidth=30,
+            itemwidth=38,
+            tracegroupgap=12,
         ),
         hovermode="x unified",
         hoverlabel=dict(
@@ -152,6 +175,33 @@ def _style(fig: go.Figure, title: str, *, height: int = 360) -> go.Figure:
         title_font=dict(size=10, color="#475569"),
         linecolor="#1e293b",
         linewidth=1,
+    )
+    return fig
+
+
+def _style_planned_actual(fig: go.Figure, title: str, *, height: int = 400) -> go.Figure:
+    """Dark theme with top event labels and curve-only legend room."""
+    meta = fig.layout.meta if isinstance(fig.layout.meta, dict) else {}
+    event_label_rows = int(meta.get("event_label_rows", 0) or 0)
+    top_margin = 70 + 34 * event_label_rows
+    bottom_margin = 104
+    chart_height = height + 30 * event_label_rows + 18
+
+    _style(fig, title, height=height)
+    fig.update_layout(
+        height=chart_height,
+        margin=dict(l=68, r=40, t=top_margin, b=bottom_margin),
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,
+            xanchor="left",
+            x=0.0,
+            font=dict(size=9, family="Courier New, monospace", color="#94a3b8"),
+            bgcolor="rgba(0,0,0,0)",
+            itemwidth=34,
+            tracegroupgap=10,
+        ),
     )
     return fig
 
@@ -198,7 +248,22 @@ def _first_true_time(df: pd.DataFrame, col: str) -> float | None:
     return float(df.loc[mask, "time_min"].iloc[0])
 
 
-def _add_event_markers(fig: go.Figure, df: pd.DataFrame, *, show_labels: bool = False) -> None:
+def _event_label_text(label: str) -> str:
+    text = str(label).upper()
+    words = text.split()
+    if len(text) <= 16 or len(words) < 2:
+        return text
+    split_at = max(1, len(words) // 2)
+    return " ".join(words[:split_at]) + "<br>" + " ".join(words[split_at:])
+
+
+def _add_event_markers(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    *,
+    show_labels: bool = True,
+    show_legend: bool = False,
+) -> None:
     if "time_min" not in df.columns or df.empty:
         return
 
@@ -228,11 +293,22 @@ def _add_event_markers(fig: go.Figure, df: pd.DataFrame, *, show_labels: bool = 
             events.append((event_time, event_label, COLORS["event"], "solid"))
 
     seen: set[tuple[float, str]] = set()
-    for index, (x_value, label, color, dash) in enumerate(events):
+    visible_events: list[tuple[float, str, str, str]] = []
+    for x_value, label, color, dash in events:
         marker_key = (round(x_value, 2), label)
         if marker_key in seen:
             continue
         seen.add(marker_key)
+        visible_events.append((x_value, label, color, dash))
+    visible_events.sort(key=lambda item: item[0])
+
+    label_rows = min(4, max(1, len(visible_events))) if show_labels and visible_events else 0
+    if label_rows:
+        fig.update_layout(meta={**(fig.layout.meta if isinstance(fig.layout.meta, dict) else {}),
+                                "event_label_rows": label_rows})
+
+    legend_labels_added: set[str] = set()
+    for index, (x_value, label, color, dash) in enumerate(visible_events):
         kwargs: dict = {
             "x": x_value,
             "line_width": 1.2,
@@ -240,16 +316,39 @@ def _add_event_markers(fig: go.Figure, df: pd.DataFrame, *, show_labels: bool = 
             "line_color": color,
             "opacity": 0.85,
         }
-        if show_labels:
-            kwargs.update(
-                annotation_text=f"<span style='font-family:Courier New;font-size:9px;"
-                                f"letter-spacing:1px;'>{label.upper()}</span>",
-                annotation_position="top",
-                annotation_font_size=9,
-                annotation_font_color=color,
-                annotation_yshift=10 + 14 * (index % 2),
-            )
         fig.add_vline(**kwargs)
+        if show_legend and label not in legend_labels_added:
+            legend_labels_added.add(label)
+            fig.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode="lines",
+                    name=label,
+                    line=dict(color=color, width=1.6, dash=dash),
+                    hoverinfo="skip",
+                    showlegend=True,
+                )
+            )
+        if show_labels:
+            row = index % label_rows
+            fig.add_annotation(
+                x=x_value,
+                y=1.07 + 0.13 * row,
+                xref="x",
+                yref="paper",
+                text=f"<b>{_event_label_text(label)}</b>",
+                showarrow=False,
+                xanchor="center",
+                yanchor="bottom",
+                align="center",
+                font=dict(color=color, size=9, family="Courier New, monospace"),
+                bgcolor="rgba(6,8,9,0.92)",
+                bordercolor=color,
+                borderwidth=1,
+                borderpad=3,
+                opacity=0.95,
+            )
 
 
 # ── Public chart functions ─────────────────────────────────────────────────────
@@ -260,7 +359,7 @@ def make_timeseries_plot(
     title: str,
     current_minute: int | float | None = None,
     *,
-    show_event_labels: bool = False,
+    show_event_labels: bool = True,
     height: int = 360,
 ) -> go.Figure:
     fig = go.Figure()
@@ -345,7 +444,7 @@ def rate_sand_plot(df: pd.DataFrame, current_minute: int | float) -> go.Figure:
             secondary_y=True,
         )
     _add_time_marker(fig, current_minute)
-    _add_event_markers(fig, df)
+    _add_event_markers(fig, df, show_labels=False)
     _style(fig, "Rate & PPA", height=360)
     fig.update_yaxes(title_text="Rate  [bpm]",   secondary_y=False,
                      title_font=dict(size=10, color="#475569"))
@@ -381,7 +480,7 @@ def make_sand_transport_plot(
             secondary_y=True,
         )
     _add_stage_lines(fig, df)
-    _add_event_markers(fig, df)
+    _add_event_markers(fig, df, show_labels=False)
     if current_minute is not None:
         _add_time_marker(fig, current_minute)
     _style(fig, "Sand Transport", height=370)
@@ -414,11 +513,186 @@ def make_pressure_decomposition_plot(
                        line=dict(color=color, width=width, dash=dash))
         )
     _add_stage_lines(fig, df)
-    _add_event_markers(fig, df)
+    _add_event_markers(fig, df, show_labels=False)
     if current_minute is not None:
         _add_time_marker(fig, current_minute)
     _style(fig, "Pressure Decomposition", height=420)
     fig.update_yaxes(title_text="Pressure  [psi]",
+                     title_font=dict(size=10, color="#475569"))
+    return fig
+
+
+def _add_trace_if_present(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    col: str,
+    *,
+    name: str | None = None,
+    color: str | None = None,
+    width: float = 2.0,
+    dash: str = "solid",
+    secondary_y: bool | None = None,
+) -> None:
+    if col not in df.columns:
+        return
+    trace = go.Scatter(
+        x=df["time_min"],
+        y=df[col],
+        name=name or _series_label(col),
+        mode="lines",
+        line=dict(color=color or _col_color(col), width=width, dash=dash),
+    )
+    if secondary_y is None:
+        fig.add_trace(trace)
+    else:
+        fig.add_trace(trace, secondary_y=secondary_y)
+
+
+def _add_envelope_band_if_present(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    low_col: str,
+    high_col: str,
+    *,
+    name: str,
+    fillcolor: str,
+    secondary_y: bool = False,
+) -> None:
+    if low_col not in df.columns or high_col not in df.columns:
+        return
+    fig.add_trace(
+        go.Scatter(
+            x=df["time_min"],
+            y=df[low_col],
+            mode="lines",
+            line=dict(width=0, color="rgba(0,0,0,0)"),
+            showlegend=False,
+            hoverinfo="skip",
+        ),
+        secondary_y=secondary_y,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["time_min"],
+            y=df[high_col],
+            name=name,
+            mode="lines",
+            line=dict(width=0, color="rgba(0,0,0,0)"),
+            fill="tonexty",
+            fillcolor=fillcolor,
+            hoverinfo="skip",
+        ),
+        secondary_y=secondary_y,
+    )
+
+
+def make_planned_actual_rate_plot(
+    df: pd.DataFrame,
+    current_minute: int | float | None = None,
+) -> go.Figure:
+    fig = go.Figure()
+    _add_trace_if_present(fig, df, "planned_rate_bpm", width=1.8, dash="dash")
+    _add_trace_if_present(fig, df, "slurry_rate_bpm", name="Actual Slurry Rate", color=COLORS["rate"], width=2.4)
+    _add_trace_if_present(fig, df, "planned_clean_rate_bpm", width=1.6, dash="dot")
+    _add_trace_if_present(fig, df, "clean_rate_bpm", name="Actual Clean Rate", color="#93c5fd", width=2.0)
+    _add_stage_lines(fig, df)
+    _add_event_markers(fig, df, show_labels=True, show_legend=False)
+    if current_minute is not None:
+        _add_time_marker(fig, current_minute)
+    _style_planned_actual(fig, "Rate: Planned vs Actual", height=400)
+    fig.update_yaxes(title_text="Rate  [bpm]", title_font=dict(size=10, color="#475569"))
+    return fig
+
+
+def make_planned_actual_ppa_plot(
+    df: pd.DataFrame,
+    current_minute: int | float | None = None,
+) -> go.Figure:
+    fig = go.Figure()
+    _add_trace_if_present(fig, df, "planned_ppa", width=1.8, dash="dash")
+    _add_trace_if_present(fig, df, "surface_ppa", name="Actual Surface PPA", color=COLORS["ppa_surf"], width=2.4)
+    _add_trace_if_present(fig, df, "planned_bottomhole_ppa", width=1.8, dash="dot")
+    _add_trace_if_present(fig, df, "bottomhole_ppa", name="Actual BH PPA", color=COLORS["ppa_bh"], width=2.2)
+    _add_stage_lines(fig, df)
+    _add_event_markers(fig, df, show_labels=True, show_legend=False)
+    if current_minute is not None:
+        _add_time_marker(fig, current_minute)
+    _style_planned_actual(fig, "PPA: Planned vs Actual", height=400)
+    fig.update_yaxes(title_text="PPA  [lb/gal]", title_font=dict(size=10, color="#475569"))
+    return fig
+
+
+def make_planned_actual_sand_plot(
+    df: pd.DataFrame,
+    current_minute: int | float | None = None,
+) -> go.Figure:
+    fig = go.Figure()
+    _add_trace_if_present(fig, df, "planned_cum_sand_lb", width=1.9, dash="dash")
+    _add_trace_if_present(fig, df, "cum_sand_surface_lb", name="Actual Surface Cum Sand", color="#cbd5e1", width=2.3)
+    _add_trace_if_present(fig, df, "cum_sand_bh_lb", name="Actual BH Cum Sand", color=COLORS["ppa_bh"], width=2.0)
+    _add_stage_lines(fig, df)
+    _add_event_markers(fig, df, show_labels=True, show_legend=False)
+    if current_minute is not None:
+        _add_time_marker(fig, current_minute)
+    _style_planned_actual(fig, "Sand: Planned vs Actual", height=400)
+    fig.update_yaxes(title_text="Cumulative Sand  [lb]", title_font=dict(size=10, color="#475569"))
+    return fig
+
+
+def make_planned_actual_pressure_plot(
+    df: pd.DataFrame,
+    current_minute: int | float | None = None,
+) -> go.Figure:
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    _add_envelope_band_if_present(
+        fig,
+        df,
+        "planned_surface_pressure_low_psi",
+        "planned_surface_pressure_high_psi",
+        name="Surface Envelope",
+        fillcolor="rgba(34,211,238,0.08)",
+        secondary_y=False,
+    )
+    _add_envelope_band_if_present(
+        fig,
+        df,
+        "planned_bhp_low_psi",
+        "planned_bhp_high_psi",
+        name="BHP Envelope",
+        fillcolor="rgba(248,113,113,0.06)",
+        secondary_y=False,
+    )
+    _add_envelope_band_if_present(
+        fig,
+        df,
+        "planned_net_pressure_low_psi",
+        "planned_net_pressure_high_psi",
+        name="Net Envelope",
+        fillcolor="rgba(74,222,128,0.08)",
+        secondary_y=True,
+    )
+    _add_trace_if_present(
+        fig, df, "planned_surface_pressure_psi", width=1.8, dash="dash", secondary_y=False
+    )
+    _add_trace_if_present(
+        fig, df, "surface_pressure_psi", name="Actual Surface", color=COLORS["surface"], width=2.5, secondary_y=False
+    )
+    _add_trace_if_present(fig, df, "planned_bhp_psi", width=1.7, dash="dash", secondary_y=False)
+    _add_trace_if_present(
+        fig, df, "bhp_psi", name="Actual BHP", color=COLORS["bhp"], width=2.2, secondary_y=False
+    )
+    _add_trace_if_present(fig, df, "planned_net_pressure_psi", width=1.7, dash="dot", secondary_y=True)
+    _add_trace_if_present(
+        fig, df, "net_pressure_psi", name="Actual Net", color=COLORS["net"], width=2.1, secondary_y=True
+    )
+    _add_stage_lines(fig, df)
+    _add_event_markers(fig, df, show_labels=True, show_legend=False)
+    if current_minute is not None:
+        _add_time_marker(fig, current_minute)
+    _style_planned_actual(fig, "Pressure: Planned vs Actual", height=470)
+    fig.update_yaxes(title_text="Surface / BHP  [psi]", secondary_y=False,
+                     title_font=dict(size=10, color="#475569"))
+    fig.update_yaxes(title_text="Net  [psi]", secondary_y=True,
                      title_font=dict(size=10, color="#475569"))
     return fig
 
