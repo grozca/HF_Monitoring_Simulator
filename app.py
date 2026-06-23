@@ -29,13 +29,21 @@ from src.data_loader import (
     summarize_dataframe,
 )
 from src.column_mapping import (
+    ExcelMode,
     NO_MAPPING,
     STANDARD_COLUMNS,
+    apply_calibration_mapping,
     apply_column_mapping,
+    apply_minifrac_mapping,
     clean_mapped_dataframe,
+    compute_g_function,
+    detect_excel_mode,
+    fit_closure_pressure,
     mapping_options,
     mapping_readiness,
+    suggest_calibration_mapping,
     suggest_column_mapping,
+    suggest_minifrac_mapping,
 )
 from src.equipment_engine import EquipmentConfig
 from src.physics_engine import WellConfig, run_physics_engine
@@ -591,6 +599,7 @@ def simulate_job(
     rate_capacity_bpm: float,
     seed: int,
 ):
+    _engine_cache_version = "sand_time_of_flight_v1"
     schedule = generate_treatment_schedule(
         TreatmentScheduleConfig(
             duration_min=duration_min,
@@ -645,6 +654,7 @@ def simulate_job(
         equipment=equipment,
     )
     enriched_df, event_log = apply_planned_vs_actual(actual_df, planned_reference_df)
+    _ = _engine_cache_version
     enriched_df.attrs["planned_actual_event_log"] = event_log
     return enriched_df
 
@@ -1218,52 +1228,172 @@ def render_excel_explorer_tab() -> None:
         st.write("Empty columns")
         st.code("\n".join(summary["empty_columns"]) or "None", language="text")
 
-    st.markdown("### Column Mapper")
-    st.caption(
-        "Map raw Excel columns into the simulator's standard names. "
-        "These mappings are only for inspection right now; calibration comes next."
-    )
-    suggested_mapping = suggest_column_mapping(columns)
-    options            = mapping_options(columns)
-    mapper_cols        = st.columns(2)
-    selected_mapping: dict[str, str | None] = {}
+    excel_mode = detect_excel_mode(columns)
     map_key_base = f"{selected_file.name}:{selected_sheet}:{int(header_row)}"
 
-    for index, standard_column in enumerate(STANDARD_COLUMNS):
-        default_source = suggested_mapping.get(standard_column.name)
-        default_option = default_source if default_source in options else NO_MAPPING
-        with mapper_cols[index % 2]:
-            selected = st.selectbox(
-                standard_column.label, options,
-                index=options.index(default_option),
-                key=f"map:{map_key_base}:{standard_column.name}",
-            )
-        selected_mapping[standard_column.name] = None if selected == NO_MAPPING else selected
-
-    mapped_preview = clean_mapped_dataframe(apply_column_mapping(preview_df, selected_mapping))
-    readiness      = mapping_readiness(mapped_preview)
-
-    map_metrics = st.columns(4)
-    map_metrics[0].metric("Mapped cols",  len(readiness["mapped_columns"]))
-    map_metrics[1].metric("Usable rows",  readiness["usable_rows"])
-    map_metrics[2].metric("Curve ready", "Yes" if readiness["can_plot"] else "No")
-    map_metrics[3].metric("Curves",       len(readiness["available_curves"]))
-
-    if not mapped_preview.empty:
-        st.markdown("### Standardized Preview")
-        st.dataframe(mapped_preview, width="stretch", hide_index=True)
-
-        if readiness["can_plot"]:
-            curve = st.selectbox("Preview mapped curve", readiness["available_curves"],
-                                  key=f"curve:{map_key_base}")
-            st.plotly_chart(
-                make_timeseries_plot(mapped_preview, (curve,), f"Mapped Preview: {curve}"),
-                width="stretch",
-            )
+    mode_cols = st.columns(3)
+    mode_cols[0].metric("Detected mode", excel_mode.value.upper())
+    if excel_mode == ExcelMode.MINIFRAC:
+        mode_cols[1].metric("Use case", "G-function / closure")
+        mode_cols[2].metric("Dashboard replay", "No")
+    elif excel_mode == ExcelMode.CALIBRATION:
+        mode_cols[1].metric("Use case", "PKN geometry")
+        mode_cols[2].metric("Dashboard replay", "No")
     else:
-        st.info("No standard columns are mapped yet.")
+        mode_cols[1].metric("Use case", "Treatment replay")
+        mode_cols[2].metric("Dashboard replay", "Yes" if excel_mode == ExcelMode.SIMULATION else "Maybe")
 
-    if st.button("Load full selected sheet", type="primary"):
+    if excel_mode == ExcelMode.MINIFRAC:
+        st.markdown("### Minifrac / DFIT Analysis")
+        st.caption(
+            "This file looks like shut-in data. Use BHP versus Nolte g-function to estimate closure pressure."
+        )
+        suggested_mapping = suggest_minifrac_mapping(columns)
+        field_labels = {
+            "time_min": "Time, min",
+            "rate_bpm": "Injection rate, bpm",
+            "bhp_psi": "BHP, psi",
+            "g_function": "Existing g-function",
+            "shutin_psi": "Shut-in pressure, psi",
+            "straight_line_psi": "Existing straight-line fit",
+        }
+        options = mapping_options(columns)
+        mapper_cols = st.columns(2)
+        selected_mapping: dict[str, str | None] = {}
+
+        for index, field_name in enumerate(field_labels):
+            default_source = suggested_mapping.get(field_name)
+            default_option = default_source if default_source in options else NO_MAPPING
+            with mapper_cols[index % 2]:
+                selected = st.selectbox(
+                    field_labels[field_name],
+                    options,
+                    index=options.index(default_option),
+                    key=f"minifrac-map:{map_key_base}:{field_name}",
+                )
+            selected_mapping[field_name] = None if selected == NO_MAPPING else selected
+
+        mapped_preview = apply_minifrac_mapping(preview_df, selected_mapping)
+        if "g_function" not in mapped_preview.columns and "time_min" in mapped_preview.columns:
+            mapped_preview = compute_g_function(mapped_preview)
+        pressure_col = "shutin_psi" if "shutin_psi" in mapped_preview.columns else "bhp_psi"
+
+        if not mapped_preview.empty:
+            st.markdown("### Minifrac Preview")
+            st.dataframe(mapped_preview, width="stretch", hide_index=True)
+            if {"g_function", pressure_col}.issubset(mapped_preview.columns):
+                fit = fit_closure_pressure(mapped_preview, bhp_col=pressure_col)
+                fit_cols = st.columns(3)
+                fit_cols[0].metric("Closure Pc", f"{fit['closure_pressure_psi']:,.0f} psi")
+                fit_cols[1].metric("Slope", f"{fit['slope_psi_per_g']:,.0f} psi/g")
+                fit_cols[2].metric("R2", f"{fit['r_squared']:.3f}")
+                chart_df = mapped_preview.copy()
+                chart_df["straight_line_psi"] = fit["straight_line_psi"]
+                st.line_chart(chart_df[["g_function", pressure_col, "straight_line_psi"]].set_index("g_function"))
+        else:
+            st.info("No minifrac columns are mapped yet.")
+
+    elif excel_mode == ExcelMode.CALIBRATION:
+        st.markdown("### PKN / HF2D Calibration Mapper")
+        st.caption(
+            "This file looks like design/model output. Map fracture geometry columns for future calibration against the simulator."
+        )
+        suggested_mapping = suggest_calibration_mapping(columns)
+        field_labels = {
+            "time_min": "Time, min",
+            "rate_bpm": "Rate, bpm",
+            "ppa": "PPA",
+            "cum_liquid_gal": "Cumulative liquid, gal",
+            "cum_prop_lbm": "Cumulative proppant, lbm",
+            "xf_ft": "Half-length xf, ft",
+            "width_in": "Fracture width, in",
+            "width_ratio": "Width ratio",
+            "net_pressure_psi": "Net pressure, psi",
+        }
+        options = mapping_options(columns)
+        mapper_cols = st.columns(2)
+        selected_mapping: dict[str, str | None] = {}
+
+        for index, field_name in enumerate(field_labels):
+            default_source = suggested_mapping.get(field_name)
+            default_option = default_source if default_source in options else NO_MAPPING
+            with mapper_cols[index % 2]:
+                selected = st.selectbox(
+                    field_labels[field_name],
+                    options,
+                    index=options.index(default_option),
+                    key=f"calibration-map:{map_key_base}:{field_name}",
+                )
+            selected_mapping[field_name] = None if selected == NO_MAPPING else selected
+
+        mapped_preview = apply_calibration_mapping(preview_df, selected_mapping)
+        if not mapped_preview.empty:
+            preview_cols = st.columns(4)
+            preview_cols[0].metric("Mapped cols", len(mapped_preview.columns))
+            preview_cols[1].metric("Rows", len(mapped_preview))
+            preview_cols[2].metric("Has xf", "Yes" if "xf_ft" in mapped_preview.columns else "No")
+            preview_cols[3].metric("Has width", "Yes" if "width_in" in mapped_preview.columns else "No")
+            st.markdown("### Calibration Preview")
+            st.dataframe(mapped_preview, width="stretch", hide_index=True)
+            plot_cols = [col for col in ("xf_ft", "width_in", "net_pressure_psi") if col in mapped_preview.columns]
+            if "time_min" in mapped_preview.columns and plot_cols:
+                st.plotly_chart(
+                    make_timeseries_plot(mapped_preview, tuple(plot_cols), "PKN Design Preview"),
+                    width="stretch",
+                )
+        else:
+            st.info("No calibration columns are mapped yet.")
+
+    else:
+        st.markdown("### Column Mapper")
+        st.caption(
+            "Map raw treatment columns into the simulator's standard names. "
+            "Use this path for real-time replay style data: rate, pressure, PPA, BHP, or net pressure."
+        )
+        suggested_mapping = suggest_column_mapping(columns)
+        options = mapping_options(columns)
+        mapper_cols = st.columns(2)
+        selected_mapping: dict[str, str | None] = {}
+
+        for index, standard_column in enumerate(STANDARD_COLUMNS):
+            default_source = suggested_mapping.get(standard_column.name)
+            default_option = default_source if default_source in options else NO_MAPPING
+            with mapper_cols[index % 2]:
+                selected = st.selectbox(
+                    standard_column.label,
+                    options,
+                    index=options.index(default_option),
+                    key=f"map:{map_key_base}:{standard_column.name}",
+                )
+            selected_mapping[standard_column.name] = None if selected == NO_MAPPING else selected
+
+        mapped_preview = clean_mapped_dataframe(apply_column_mapping(preview_df, selected_mapping))
+        readiness = mapping_readiness(mapped_preview)
+
+        map_metrics = st.columns(4)
+        map_metrics[0].metric("Mapped cols", len(readiness["mapped_columns"]))
+        map_metrics[1].metric("Usable rows", readiness["usable_rows"])
+        map_metrics[2].metric("Curve ready", "Yes" if readiness["can_plot"] else "No")
+        map_metrics[3].metric("Curves", len(readiness["available_curves"]))
+
+        if not mapped_preview.empty:
+            st.markdown("### Standardized Preview")
+            st.dataframe(mapped_preview, width="stretch", hide_index=True)
+
+            if readiness["can_plot"]:
+                curve = st.selectbox(
+                    "Preview mapped curve",
+                    readiness["available_curves"],
+                    key=f"curve:{map_key_base}",
+                )
+                st.plotly_chart(
+                    make_timeseries_plot(mapped_preview, (curve,), f"Mapped Preview: {curve}"),
+                    width="stretch",
+                )
+        else:
+            st.info("No standard columns are mapped yet.")
+
+    if st.button("Load full selected sheet", type="primary", key=f"load-full:{map_key_base}"):
         try:
             full_df = load_table(selected_file.path, sheet_name=selected_sheet, header_row=int(header_row))
         except Exception as exc:
@@ -1273,6 +1403,48 @@ def render_excel_explorer_tab() -> None:
         full_summary = summarize_dataframe(full_df)
         st.success(f"Loaded {full_summary['rows']} rows and {full_summary['columns']} columns.")
         st.dataframe(full_df.head(200), width="stretch", hide_index=True)
+
+        if excel_mode == ExcelMode.MINIFRAC:
+            full_mapped = apply_minifrac_mapping(full_df, selected_mapping)
+            if "g_function" not in full_mapped.columns and "time_min" in full_mapped.columns:
+                full_mapped = compute_g_function(full_mapped)
+            pressure_col = "shutin_psi" if "shutin_psi" in full_mapped.columns else "bhp_psi"
+            if not full_mapped.empty:
+                st.markdown("### Full Minifrac Analysis")
+                st.dataframe(full_mapped.head(200), width="stretch", hide_index=True)
+                if {"g_function", pressure_col}.issubset(full_mapped.columns):
+                    fit = fit_closure_pressure(full_mapped, bhp_col=pressure_col)
+                    fit_cols = st.columns(3)
+                    fit_cols[0].metric("Closure Pc", f"{fit['closure_pressure_psi']:,.0f} psi")
+                    fit_cols[1].metric("Slope", f"{fit['slope_psi_per_g']:,.0f} psi/g")
+                    fit_cols[2].metric("R2", f"{fit['r_squared']:.3f}")
+                    export_df = full_mapped.copy()
+                    export_df["straight_line_psi"] = fit["straight_line_psi"]
+                    export_df["deviation_psi"] = fit["deviation_psi"]
+                    csv = export_df.to_csv(index=False).encode("utf-8")
+                else:
+                    csv = full_mapped.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download minifrac analysis CSV",
+                    data=csv,
+                    file_name=f"minifrac_{selected_file.path.stem}_{selected_sheet}.csv",
+                    mime="text/csv",
+                )
+            return
+
+        if excel_mode == ExcelMode.CALIBRATION:
+            full_mapped = apply_calibration_mapping(full_df, selected_mapping)
+            if not full_mapped.empty:
+                st.markdown("### Full PKN / HF2D Calibration Data")
+                st.dataframe(full_mapped.head(200), width="stretch", hide_index=True)
+                csv = full_mapped.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download calibration mapped CSV",
+                    data=csv,
+                    file_name=f"calibration_{selected_file.path.stem}_{selected_sheet}.csv",
+                    mime="text/csv",
+                )
+            return
 
         full_mapped = clean_mapped_dataframe(apply_column_mapping(full_df, selected_mapping))
         if not full_mapped.empty:
@@ -1650,7 +1822,7 @@ def main() -> None:
             "time_min","phase","slurry_rate_bpm","rate_bph","clean_rate_bpm",
             "measured_depth_ft","tvd_ft","casing_id_in",
             "surface_pressure_psi","treating_pressure_limit_psi","pressure_margin_psi",
-            "surface_ppa","bottomhole_ppa","sand_lag_min","ppa_lag_delta",
+            "surface_ppa","bottomhole_ppa","sand_lag_min","sand_lag_actual_min","ppa_lag_delta",
             "sand_arrived_at_perfs","flush_started","flush_arrived_at_perfs",
             "sand_rate_lbm_min","sand_rate_bh_lbm_min","sand_in_wellbore_lb",
             "slurry_density_ppg","hydrostatic_psi","reynolds_proxy","friction_factor_proxy",
@@ -1663,8 +1835,9 @@ def main() -> None:
             "acceptance_index","formation_acceptance_pct",
             "screenout_risk","screenout_risk_pct","alarm","engineer_diagnosis","event",
         ]
-        st.dataframe(live_df[display_cols].tail(100), width="stretch", hide_index=True)
-        csv = df[display_cols].to_csv(index=False).encode("utf-8")
+        available_display_cols = [col for col in display_cols if col in live_df.columns]
+        st.dataframe(live_df[available_display_cols].tail(100), width="stretch", hide_index=True)
+        csv = df[available_display_cols].to_csv(index=False).encode("utf-8")
         file_scenario = str(controls["scenario"]).lower().replace(" ", "_")
         st.download_button(
             "Download full simulated job CSV", data=csv,

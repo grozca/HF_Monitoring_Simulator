@@ -86,11 +86,11 @@ def _interp_with_left_fill(
     return np.interp(x_new, x, y, left=left, right=float(y[-1]))
 
 
-def calculate_bottomhole_ppa(
+def calculate_bottomhole_ppa_quasi_steady(
     df: pd.DataFrame,
     config: SandTransportConfig | None = None,
 ) -> pd.Series:
-    """Calculate bottomhole PPA using a dynamic wellbore lag."""
+    """Calculate bottomhole PPA with the legacy quasi-steady lag approximation."""
     config = config or SandTransportConfig()
 
     required = {"time_min", "ppa", "slurry_rate_bpm"}
@@ -111,6 +111,71 @@ def calculate_bottomhole_ppa(
         smoothed[i] = value if i == 0 else mixing * value + (1.0 - mixing) * smoothed[i - 1]
 
     return pd.Series(smoothed, index=df.index, name="bottomhole_ppa")
+
+
+def calculate_bottomhole_ppa_time_of_flight(
+    df: pd.DataFrame,
+    config: SandTransportConfig | None = None,
+) -> tuple[pd.Series, pd.Series]:
+    """Calculate bottomhole PPA with plug-flow time-of-flight.
+
+    A slurry packet reaches the perforations after the cumulative pumped
+    volume since it entered the wellbore equals the wellbore volume. This
+    handles rate changes more realistically than using the instantaneous
+    current-rate lag at the observation time.
+    """
+    config = config or SandTransportConfig()
+
+    required = {"time_min", "ppa", "slurry_rate_bpm"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns for sand lag: {sorted(missing)}")
+
+    if df.empty:
+        empty = pd.Series(dtype=float)
+        return empty.rename("bottomhole_ppa"), empty.rename("sand_lag_actual_min")
+
+    time = df["time_min"].to_numpy(dtype=float)
+    surface_ppa = df["ppa"].to_numpy(dtype=float)
+    rate = df["slurry_rate_bpm"].to_numpy(dtype=float)
+    dt = _time_steps_min(df["time_min"])
+    cum_volume_bbl = np.cumsum(np.clip(rate, 0.0, None) * dt)
+
+    wellbore_volume_bbl = estimate_wellbore_volume_bbl(config)
+    target_volume = cum_volume_bbl - wellbore_volume_bbl
+
+    # Invert cumulative volume to find the surface time of the packet that is
+    # currently arriving. Keep the first occurrence of duplicate volumes so
+    # zero-rate plateaus do not create interpolation ambiguity.
+    unique_volume, unique_idx = np.unique(cum_volume_bbl, return_index=True)
+    unique_time = time[unique_idx]
+    if len(unique_volume) <= 1:
+        t_prime = np.full_like(time, time[0], dtype=float)
+    else:
+        t_prime = np.interp(target_volume, unique_volume, unique_time, left=time[0])
+
+    not_yet_arrived = target_volume < 0.0
+    bottomhole_raw = np.interp(t_prime, time, surface_ppa)
+    bottomhole_raw = np.where(not_yet_arrived, 0.0, bottomhole_raw)
+    actual_lag_min = np.where(not_yet_arrived, np.nan, time - t_prime)
+
+    mixing = float(np.clip(config.mixing_efficiency, 0.01, 1.0))
+    smoothed = np.zeros_like(bottomhole_raw)
+    for i, value in enumerate(bottomhole_raw):
+        smoothed[i] = value if i == 0 else mixing * value + (1.0 - mixing) * smoothed[i - 1]
+
+    bottomhole_ppa = pd.Series(smoothed, index=df.index, name="bottomhole_ppa")
+    sand_lag_actual_min = pd.Series(actual_lag_min, index=df.index, name="sand_lag_actual_min")
+    return bottomhole_ppa, sand_lag_actual_min
+
+
+def calculate_bottomhole_ppa(
+    df: pd.DataFrame,
+    config: SandTransportConfig | None = None,
+) -> pd.Series:
+    """Calculate bottomhole PPA using time-of-flight wellbore lag."""
+    bottomhole_ppa, _ = calculate_bottomhole_ppa_time_of_flight(df, config)
+    return bottomhole_ppa
 
 
 def _time_steps_min(time_min: pd.Series) -> np.ndarray:
@@ -214,7 +279,7 @@ def apply_sand_transport(
     out = df.copy()
     out["surface_ppa"] = out["ppa"]
     out["sand_lag_min"] = calculate_dynamic_lag_min(out, config)
-    out["bottomhole_ppa"] = calculate_bottomhole_ppa(out, config)
+    out["bottomhole_ppa"], out["sand_lag_actual_min"] = calculate_bottomhole_ppa_time_of_flight(out, config)
 
     out = calculate_sand_rates_and_inventory(out)
     out = detect_sand_and_flush_arrival(out, ppa_threshold=ppa_threshold)

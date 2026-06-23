@@ -192,9 +192,12 @@ def calculate_acceptance_index(
     sand_capacity_lb = cum_slurry * config.proppant_capacity_lb_per_bbl
     sand_loading_ratio = (cum_sand / sand_capacity_lb.replace(0.0, np.nan)).fillna(0.0).clip(0.0, 2.0)
 
+    proppant_gate = _sigmoid(14.0 * (bh_ppa - 0.12))
     ppa_penalty = np.clip((bh_ppa - 0.5) / 2.5, 0.0, 1.0)
-    slope_penalty = np.clip(net_slope / config.screenout_pressure_slope_threshold_psi_min, 0.0, 2.0) / 2.0
-    narrow_width_penalty = np.clip((0.28 - width) / 0.28, 0.0, 1.0)
+    slope_penalty = (
+        np.clip(net_slope / config.screenout_pressure_slope_threshold_psi_min, 0.0, 2.0) / 2.0
+    ) * proppant_gate
+    narrow_width_penalty = np.clip((0.28 - width) / 0.28, 0.0, 1.0) * proppant_gate
     sand_loading_penalty = np.clip((sand_loading_ratio - 0.55) / 0.65, 0.0, 1.0)
 
     total_penalty = (
@@ -224,10 +227,11 @@ def calculate_screenout_risk(
     acceptance = df["acceptance_index"].astype(float)
     width = df["fracture_width_in"].astype(float)
 
+    proppant_gate = _sigmoid(14.0 * (bh_ppa - 0.12))
     ppa_term = np.clip((bh_ppa - 0.35) / 2.0, 0.0, 1.5)
-    slope_term = np.clip(net_slope / config.screenout_pressure_slope_threshold_psi_min, -1.0, 3.0)
+    slope_term = np.clip(net_slope / config.screenout_pressure_slope_threshold_psi_min, -1.0, 3.0) * proppant_gate
     acceptance_term = 1.0 - acceptance
-    width_term = np.clip((0.25 - width) / 0.25, 0.0, 1.0)
+    width_term = np.clip((0.25 - width) / 0.25, 0.0, 1.0) * proppant_gate
 
     raw = -2.2 + 1.15 * ppa_term + 1.45 * slope_term + 2.00 * acceptance_term + 0.80 * width_term
     risk = _sigmoid(raw)
@@ -246,8 +250,9 @@ def classify_formation_state(df: pd.DataFrame) -> pd.Series:
         net_pressure = float(row.get("net_pressure_psi", 0.0))
         slope = float(net_slope.loc[idx])
         bh_ppa = float(row.get("bottomhole_ppa", row.get("ppa", 0.0)))
+        surface_ppa = float(row.get("surface_ppa", row.get("ppa", 0.0)))
 
-        if slope < -80.0 and bh_ppa > 0.1:
+        if slope < -80.0 and bh_ppa > 0.1 and surface_ppa > 0.05:
             state: FormationState = "Pressure sink / communication"
         elif risk >= 0.80:
             state = "Critical screenout risk"
@@ -319,15 +324,6 @@ def apply_formation_engine(
     out["fluid_efficiency"] = calculate_fluid_efficiency(out)
     out["acceptance_index"] = calculate_acceptance_index(out, config)
     out["screenout_risk"] = calculate_screenout_risk(out, config)
-
-    if scenario == "Screenout":
-        bh_ppa = out["bottomhole_ppa"] if "bottomhole_ppa" in out.columns else out["ppa"]
-        mask = bh_ppa > 0.4
-        out.loc[mask, "screenout_risk"] = np.maximum(out.loc[mask, "screenout_risk"], 0.55)
-    elif scenario in {"Frac Hit", "Natural Fracture Hit"}:
-        out["screenout_risk"] = (
-            out["screenout_risk"] * (1.0 - config.natural_fracture_sink_strength)
-        ).clip(0.0, 1.0)
 
     out["formation_pressure_adjustment_psi"] = calculate_pressure_adjustment(
         out,
