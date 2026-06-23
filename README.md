@@ -1,4 +1,4 @@
-# GROZFRAC Frac Monitoring Simulator
+# HF Monitoring Simulator
 
 A simple professional training simulator for frac monitoring and completion-engineering practice.
 
@@ -33,6 +33,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Run With Docker
+
+```powershell
+docker build -t hf-monitoring-simulator .
+docker run --rm -p 8080:8080 hf-monitoring-simulator
+```
+
+Then open:
+
+```text
+http://localhost:8080
+```
+
+## AWS Deployment Prep
+
+The project is container-ready through `Dockerfile` and `.dockerignore`.
+
+Recommended AWS paths:
+
+- Elastic Beanstalk with the Docker platform for the simplest first deployment.
+- ECS/Fargate with an ECR image for a more production-style container setup.
+- Lightsail Containers for a smaller, simpler container hosting option.
+- App Runner only if the AWS account already has access to App Runner.
+
+The container listens on port `8080` and runs:
+
+```text
+streamlit run app.py --server.address=0.0.0.0 --server.port=8080
+```
+
 ## Engineering Equations
 
 ```text
@@ -40,8 +70,8 @@ BHP = Surface Pressure + Hydrostatic - Pipe Friction - Perf Friction
 BHP Gradient = BHP / TVD
 Net Pressure = BHP - Closure Pressure
 Sand Rate = Clean Rate * 42 * PPA
-Bottomhole PPA(t) = Surface PPA(t - Sand Lag)
-Sand Lag = Wellbore Volume / Slurry Rate
+Bottomhole PPA = Surface PPA from the slurry packet that has reached perforations
+Sand Lag = Time-of-flight from cumulative pumped volume and wellbore volume
 Wellbore Volume = Measured Depth * Capacity
 Width Proxy = Net Pressure / Rock Stiffness
 Formation Acceptance = f(bottomhole PPA, net pressure slope, width, sand loading)
