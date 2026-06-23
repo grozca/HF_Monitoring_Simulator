@@ -26,6 +26,10 @@ secrets/
 streamlit.log
 streamlit.err.log
 
+# Build and deployment bundles
+dist/
+*.zip
+
 # Raw, processed, and scenario data should be added intentionally.
 data/raw/*
 !data/raw/.gitkeep
